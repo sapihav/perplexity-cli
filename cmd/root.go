@@ -30,4 +30,5 @@ func Execute() error {
 
 func init() {
 	rootCmd.AddCommand(newSearchCmd())
+	rootCmd.AddCommand(newVersionCmd())
 }

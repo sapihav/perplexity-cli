@@ -10,6 +10,16 @@ Milestone 1 — single subcommand: `search`. See `docs/backlog/` for what's next
 
 ## Install
 
+**One-line install (recommended)** — no Go toolchain required:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/sapihav/perplexity-cli/main/install.sh | bash
+```
+
+Downloads the latest release for your OS/arch, verifies SHA-256, installs `perplexity` to `/usr/local/bin`. Override with `INSTALL_DIR=$HOME/.local/bin`. Requires `curl` + `jq`.
+
+**From source** (requires Go 1.25+):
+
 ```sh
 go install github.com/sapihav/perplexity-cli@latest
 ```
