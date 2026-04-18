@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -29,5 +30,55 @@ func TestRunSearch_MissingAPIKey_ExitsCode2(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout should be empty on config error, got %q", stdout.String())
+	}
+}
+
+// TestWriteJSON_EnvelopeShape asserts the stable stdout envelope: schema_version,
+// provider, command, elapsed_ms, result. This is the contract downstream agents
+// depend on — break it and you break every consumer.
+func TestWriteJSON_EnvelopeShape(t *testing.T) {
+	env := envelope{
+		SchemaVersion: "1",
+		Provider:      "perplexity",
+		Command:       "search",
+		ElapsedMs:     42,
+		Result: searchOutput{
+			Answer:    "Paris.",
+			Model:     "sonar",
+			Citations: []string{"https://example.com/a"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := writeJSON(&buf, env, &searchFlags{}); err != nil {
+		t.Fatalf("writeJSON: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, buf.String())
+	}
+	for _, key := range []string{"schema_version", "provider", "command", "elapsed_ms", "result"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("envelope missing key %q; got %v", key, got)
+		}
+	}
+	if got["schema_version"] != "1" {
+		t.Errorf("schema_version = %v, want \"1\"", got["schema_version"])
+	}
+	if got["provider"] != "perplexity" {
+		t.Errorf("provider = %v, want perplexity", got["provider"])
+	}
+	if got["command"] != "search" {
+		t.Errorf("command = %v, want search", got["command"])
+	}
+	result, ok := got["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result is not an object: %T", got["result"])
+	}
+	if result["answer"] != "Paris." {
+		t.Errorf("result.answer = %v, want Paris.", result["answer"])
+	}
+	if result["model"] != "sonar" {
+		t.Errorf("result.model = %v, want sonar", result["model"])
 	}
 }

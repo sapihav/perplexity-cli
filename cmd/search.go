@@ -9,12 +9,23 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/sapihav/perplexity-cli/internal/client"
 	"github.com/spf13/cobra"
 )
 
-// searchOutput is what we write to stdout on success: answer + citations,
+// envelope is the stable stdout wrapper around every successful command result.
+// Field order mirrors the contract documented in README.md / CLAUDE.md.
+type envelope struct {
+	SchemaVersion string `json:"schema_version"`
+	Provider      string `json:"provider"`
+	Command       string `json:"command"`
+	ElapsedMs     int64  `json:"elapsed_ms"`
+	Result        any    `json:"result"`
+}
+
+// searchOutput is what we put in envelope.result on success: answer + citations,
 // plus the resolved model for convenience. Kept intentionally small per M1.
 type searchOutput struct {
 	Answer    string   `json:"answer"`
@@ -51,6 +62,7 @@ func newSearchCmd() *cobra.Command {
 }
 
 func runSearch(ctx context.Context, stdout, stderr io.Writer, query string, f *searchFlags) error {
+	start := time.Now()
 	apiKey := os.Getenv("PERPLEXITY_API_KEY")
 	if apiKey == "" {
 		setExit(2)
@@ -90,7 +102,14 @@ func runSearch(ctx context.Context, stdout, stderr io.Writer, query string, f *s
 		out.Answer = resp.Choices[0].Message.Content
 	}
 
-	return writeJSON(stdout, out, f)
+	env := envelope{
+		SchemaVersion: "1",
+		Provider:      "perplexity",
+		Command:       "search",
+		ElapsedMs:     time.Since(start).Milliseconds(),
+		Result:        out,
+	}
+	return writeJSON(stdout, env, f)
 }
 
 // handleClientError maps a client error to our exit-code taxonomy and prints

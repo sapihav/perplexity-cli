@@ -32,10 +32,10 @@ There is no config-file fallback. Missing env var exits with code `2`.
 perplexity search "what is the capital of France?"
 ```
 
-Example output (compact by default, one JSON object per invocation):
+Example output (compact by default, one JSON envelope per invocation):
 
 ```json
-{"answer":"The capital of France is Paris.","model":"sonar","citations":["https://en.wikipedia.org/wiki/Paris","https://www.britannica.com/place/Paris"]}
+{"schema_version":"1","provider":"perplexity","command":"search","elapsed_ms":1234,"result":{"answer":"The capital of France is Paris.","model":"sonar","citations":["https://en.wikipedia.org/wiki/Paris","https://www.britannica.com/place/Paris"]}}
 ```
 
 Pretty-printed:
@@ -46,12 +46,18 @@ perplexity search "what is the capital of France?" --pretty
 
 ```json
 {
-  "answer": "The capital of France is Paris.",
-  "model": "sonar",
-  "citations": [
-    "https://en.wikipedia.org/wiki/Paris",
-    "https://www.britannica.com/place/Paris"
-  ]
+  "schema_version": "1",
+  "provider": "perplexity",
+  "command": "search",
+  "elapsed_ms": 1234,
+  "result": {
+    "answer": "The capital of France is Paris.",
+    "model": "sonar",
+    "citations": [
+      "https://en.wikipedia.org/wiki/Paris",
+      "https://www.britannica.com/place/Paris"
+    ]
+  }
 }
 ```
 
@@ -68,8 +74,8 @@ perplexity search "what is the capital of France?" --pretty
 
 ## Output contract
 
-- **stdout**: one JSON object per invocation with `answer`, `model`, `citations` (array of URL strings).
-- **stderr**: human-readable progress / errors only.
+- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. The per-command payload lives under `result` (for `search`: `answer`, `model`, `citations[]`).
+- **stderr**: human-readable progress / errors only. No envelope on the error path.
 - **Exit codes**: `0` success, `1` API error (HTTP ≥ 400 after retries), `2` user/config error (e.g., missing env var), `3` network error.
 
 ## Development
@@ -82,4 +88,4 @@ go build -o perplexity .
 
 ## License
 
-MIT — see `LICENSE` (to be added).
+MIT — see [`LICENSE`](./LICENSE).
