@@ -10,7 +10,15 @@ Milestone 1 — single subcommand: `search`. See `docs/backlog/` for what's next
 
 ## Install
 
-**One-line install (recommended)** — no Go toolchain required:
+**Homebrew (macOS)** — recommended on Mac:
+
+```sh
+brew install sapihav/tap/perplexity
+```
+
+The tap auto-installs on first use; subsequent `brew upgrade` picks up new releases.
+
+**One-line install (Linux / macOS)** — no Go toolchain required:
 
 ```sh
 curl -sSL https://raw.githubusercontent.com/sapihav/perplexity-cli/main/install.sh | bash
