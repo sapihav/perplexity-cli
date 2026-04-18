@@ -11,7 +11,7 @@ Thin CLI wrapper for the Perplexity API (Sonar + Deep Research) — `perplexity`
 
 ## Status
 
-Phase 1 — foundation CLI per ROADMAP §7. Currently a placeholder scaffold (`main.go`). Stack/implementation TBD per ROADMAP §2 (Python + uv + Typer + httpx + Pydantic planned).
+Phase 1 — foundation CLI per ROADMAP §7. **M1 shipped** — `search` subcommand. Stack: **Go 1.25.6** + `spf13/cobra` + stdlib `net/http` (overrides ROADMAP §2's Python stack).
 
 ## Auth
 
