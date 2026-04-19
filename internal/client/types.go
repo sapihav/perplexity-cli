@@ -30,6 +30,36 @@ type Choice struct {
 	Message Message `json:"message"`
 }
 
+// SearchRequest is the POST /search request body. Field names mirror the
+// Perplexity wire contract exactly; omitempty keeps optional filters out of
+// the JSON when unset so the API sees a minimal request.
+type SearchRequest struct {
+	Query          string   `json:"query"`
+	MaxResults     int      `json:"max_results,omitempty"`
+	Country        string   `json:"country,omitempty"`
+	Language       []string `json:"search_language_filter,omitempty"`
+	DomainFilter   []string `json:"search_domain_filter,omitempty"`
+	RecencyFilter  string   `json:"search_recency_filter,omitempty"`
+	SearchAfter    string   `json:"search_after_date,omitempty"`
+	SearchBefore   string   `json:"search_before_date,omitempty"`
+}
+
+// SearchResponse is the POST /search response envelope. Unknown fields are
+// ignored. The API returns `date` + `last_updated`; we surface `date` to
+// consumers as `published_date` in the command-level output shape.
+type SearchResponse struct {
+	Results []SearchResult `json:"results"`
+}
+
+// SearchResult is one hit from POST /search on the wire.
+type SearchResult struct {
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Snippet     string `json:"snippet"`
+	Date        string `json:"date"`
+	LastUpdated string `json:"last_updated"`
+}
+
 // APIError is returned when the upstream API responds with HTTP >= 400
 // after retries are exhausted. Body is the raw response body (may be JSON).
 type APIError struct {

@@ -184,7 +184,7 @@ func TestRunSearch_DryRun_NoNetwork(t *testing.T) {
 	t.Setenv("PERPLEXITY_API_KEY", "k-123")
 
 	var stdout, stderr bytes.Buffer
-	f := &searchFlags{model: "sonar"}
+	f := &searchFlags{maxResults: 10}
 	if err := runSearch(context.Background(), &stdout, &stderr, "q", f); err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
@@ -194,5 +194,8 @@ func TestRunSearch_DryRun_NoNetwork(t *testing.T) {
 	}
 	if !strings.Contains(s, "Bearer ***REDACTED***") {
 		t.Errorf("dry-run missing redaction: %q", s)
+	}
+	if !strings.Contains(s, "/search") {
+		t.Errorf("dry-run should target /search endpoint: %q", s)
 	}
 }

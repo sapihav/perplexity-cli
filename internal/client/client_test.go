@@ -274,6 +274,79 @@ func TestWithRateLimit_EnforcesInterval(t *testing.T) {
 	}
 }
 
+func TestSearch_HappyPath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if got := r.Header.Get("Authorization"); got != "Bearer k" {
+			t.Errorf("Authorization = %q", got)
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req SearchRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("request body not JSON: %v", err)
+		}
+		if req.Query != "hello" || req.MaxResults != 5 {
+			t.Errorf("unexpected request: %+v", req)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://example.com","snippet":"S","date":"2024-01-15","last_updated":"2024-02-01"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithSearchEndpoint(srv.URL+"/search"), WithBackoff(zeroBackoff))
+	resp, err := c.Search(context.Background(), SearchRequest{Query: "hello", MaxResults: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if gotPath != "/search" {
+		t.Errorf("path = %q, want /search", gotPath)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Title != "T" || resp.Results[0].Date != "2024-01-15" {
+		t.Errorf("unexpected results: %+v", resp.Results)
+	}
+}
+
+func TestSearch_RetriesOn429(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithSearchEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	resp, err := c.Search(context.Background(), SearchRequest{Query: "q"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if resp == nil || calls.Load() != 2 {
+		t.Errorf("calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestDumpSearch_RedactsAuthorizationAndTargetsSearch(t *testing.T) {
+	c := New("super-secret-key", WithSearchEndpoint("https://example.test/search"))
+	out, err := c.DumpSearch(SearchRequest{Query: "hi", MaxResults: 10, Country: "US"})
+	if err != nil {
+		t.Fatalf("DumpSearch: %v", err)
+	}
+	if strings.Contains(out, "super-secret-key") {
+		t.Errorf("DumpSearch leaked API key: %q", out)
+	}
+	if !strings.Contains(out, "Authorization: Bearer ***REDACTED***") {
+		t.Errorf("DumpSearch missing redacted Authorization: %q", out)
+	}
+	if !strings.Contains(out, "POST https://example.test/search") {
+		t.Errorf("DumpSearch missing endpoint line: %q", out)
+	}
+	if !strings.Contains(out, `"query": "hi"`) || !strings.Contains(out, `"country": "US"`) {
+		t.Errorf("DumpSearch missing body fields: %q", out)
+	}
+}
+
 func TestDefaultBackoff_IsExponential(t *testing.T) {
 	cases := []struct {
 		attempt int

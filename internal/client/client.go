@@ -1,6 +1,7 @@
-// Package client is a thin wrapper over the Perplexity chat-completions
-// endpoint. It exposes one call (Complete) plus retry-with-backoff on
-// 429 and 5xx responses. No hidden state, no caches, no file I/O.
+// Package client is a thin wrapper over the Perplexity public HTTP APIs.
+// It exposes Complete (POST /chat/completions) and Search (POST /search),
+// both with retry-with-backoff on 429 and 5xx responses. No hidden state,
+// no caches, no file I/O.
 package client
 
 import (
@@ -14,19 +15,28 @@ import (
 	"time"
 )
 
-// DefaultEndpoint is the Perplexity chat-completions URL.
-const DefaultEndpoint = "https://api.perplexity.ai/chat/completions"
+// DefaultChatEndpoint is the Perplexity chat-completions URL.
+const DefaultChatEndpoint = "https://api.perplexity.ai/chat/completions"
+
+// DefaultSearchEndpoint is the Perplexity standalone /search URL.
+const DefaultSearchEndpoint = "https://api.perplexity.ai/search"
+
+// DefaultEndpoint is the chat-completions URL. Kept as a named alias so
+// existing callers (and tests) that constructed clients before the /search
+// migration continue to compile. New code should refer to DefaultChatEndpoint.
+const DefaultEndpoint = DefaultChatEndpoint
 
 // DefaultUserAgent is sent unless callers override it via WithUserAgent.
 const DefaultUserAgent = "perplexity-cli"
 
 // Client calls the Perplexity API. Construct with New.
 type Client struct {
-	httpClient *http.Client
-	endpoint   string
-	apiKey     string
-	userAgent  string
-	maxRetries int
+	httpClient     *http.Client
+	chatEndpoint   string
+	searchEndpoint string
+	apiKey         string
+	userAgent      string
+	maxRetries     int
 	// backoff returns the duration to sleep before retry attempt n (1-indexed).
 	// Exposed for tests; nil means use exponential default (250ms * 2^(n-1)).
 	backoff func(attempt int) time.Duration
@@ -42,9 +52,15 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) { c.httpClient = h }
 }
 
-// WithEndpoint overrides the API URL (useful in tests to point at httptest.Server).
+// WithEndpoint overrides the chat-completions API URL (for tests pointing at
+// httptest.Server). Retained as an alias for the pre-migration name.
 func WithEndpoint(url string) Option {
-	return func(c *Client) { c.endpoint = url }
+	return func(c *Client) { c.chatEndpoint = url }
+}
+
+// WithSearchEndpoint overrides the /search API URL (for tests).
+func WithSearchEndpoint(url string) Option {
+	return func(c *Client) { c.searchEndpoint = url }
 }
 
 // WithMaxRetries sets how many times a 429/5xx response is retried. 0 disables retries.
@@ -87,11 +103,12 @@ func WithRateLimit(perSec float64) Option {
 // before calling. A zero-value http.Client is used unless WithHTTPClient is passed.
 func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
-		httpClient: &http.Client{Timeout: 60 * time.Second},
-		endpoint:   DefaultEndpoint,
-		apiKey:     apiKey,
-		userAgent:  DefaultUserAgent,
-		maxRetries: 3,
+		httpClient:     &http.Client{Timeout: 60 * time.Second},
+		chatEndpoint:   DefaultChatEndpoint,
+		searchEndpoint: DefaultSearchEndpoint,
+		apiKey:         apiKey,
+		userAgent:      DefaultUserAgent,
+		maxRetries:     3,
 	}
 	for _, o := range opts {
 		o(c)
@@ -119,7 +136,38 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	raw, err := c.postJSON(ctx, c.chatEndpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	var out Response
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &out, nil
+}
 
+// Search sends a POST /search request and returns the parsed response. Same
+// retry semantics as Complete; returns *APIError on final HTTP failure.
+func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal search request: %w", err)
+	}
+	raw, err := c.postJSON(ctx, c.searchEndpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	var out SearchResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode search response: %w", err)
+	}
+	return &out, nil
+}
+
+// postJSON runs the shared retry loop against the given endpoint, returning
+// the raw body on success or *APIError / network error on final failure.
+func (c *Client) postJSON(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -137,7 +185,7 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 			}
 		}
 
-		resp, err := c.do(ctx, body)
+		resp, err := c.do(ctx, endpoint, body)
 		if err != nil {
 			lastErr = err
 			if attempt == c.maxRetries {
@@ -156,12 +204,7 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 		if resp.status >= 400 {
 			return nil, &APIError{Status: resp.status, Body: string(resp.body)}
 		}
-
-		var out Response
-		if err := json.Unmarshal(resp.body, &out); err != nil {
-			return nil, fmt.Errorf("decode response: %w", err)
-		}
-		return &out, nil
+		return resp.body, nil
 	}
 
 	if lastErr == nil {
@@ -175,9 +218,9 @@ type rawResponse struct {
 	body   []byte
 }
 
-// do performs a single HTTP request and reads the full body.
-func (c *Client) do(ctx context.Context, body []byte) (*rawResponse, error) {
-	httpReq, err := c.buildHTTPRequest(ctx, body)
+// do performs a single HTTP request to endpoint and reads the full body.
+func (c *Client) do(ctx context.Context, endpoint string, body []byte) (*rawResponse, error) {
+	httpReq, err := c.buildHTTPRequest(ctx, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -194,8 +237,8 @@ func (c *Client) do(ctx context.Context, body []byte) (*rawResponse, error) {
 	return &rawResponse{status: resp.StatusCode, body: b}, nil
 }
 
-func (c *Client) buildHTTPRequest(ctx context.Context, body []byte) (*http.Request, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+func (c *Client) buildHTTPRequest(ctx context.Context, endpoint string, body []byte) (*http.Request, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -206,20 +249,33 @@ func (c *Client) buildHTTPRequest(ctx context.Context, body []byte) (*http.Reque
 	return httpReq, nil
 }
 
-// Dump returns a human-readable trace of the request that Complete would send.
-// The Authorization header is redacted; body is the serialized JSON. Intended
-// for --dry-run and --verbose output. No network call is made.
+// Dump returns a human-readable trace of the chat-completions request that
+// Complete would send. The Authorization header is redacted; body is the
+// serialized JSON. Intended for --dry-run / --verbose output. No network call.
 func (c *Client) Dump(req Request) (string, error) {
 	body, err := json.MarshalIndent(req, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
+	return c.renderDump(c.chatEndpoint, body), nil
+}
+
+// DumpSearch mirrors Dump for the /search endpoint.
+func (c *Client) DumpSearch(req SearchRequest) (string, error) {
+	body, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal search request: %w", err)
+	}
+	return c.renderDump(c.searchEndpoint, body), nil
+}
+
+func (c *Client) renderDump(endpoint string, body []byte) string {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "POST %s\n", c.endpoint)
+	fmt.Fprintf(&buf, "POST %s\n", endpoint)
 	fmt.Fprintf(&buf, "Authorization: Bearer ***REDACTED***\n")
 	fmt.Fprintf(&buf, "Content-Type: application/json\n")
 	fmt.Fprintf(&buf, "Accept: application/json\n")
 	fmt.Fprintf(&buf, "User-Agent: %s\n", c.userAgent)
 	fmt.Fprintf(&buf, "\n%s\n", body)
-	return buf.String(), nil
+	return buf.String()
 }

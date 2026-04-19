@@ -33,7 +33,7 @@ Phase 1 — foundation CLI per ROADMAP §7. **M1 + M2 shipped** — `search`, `a
   }
   ```
 - **stderr**: human-readable progress + errors. With `--json-errors`: structured `{error:{message,code,hint?,docs_url?}}`
-- **Exit codes**: `0` success / `1` user/config error / `2` API error / `3` network error
+- **Exit codes**: `0` success / `1` API error (HTTP ≥ 400 after retries) / `2` user/config error / `3` network error
 - **`--pretty`**: indent JSON for humans
 
 ## Standard flags (every subcommand)

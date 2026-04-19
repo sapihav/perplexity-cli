@@ -6,9 +6,11 @@ Binary name: `perplexity` (not `perplexity-cli`).
 
 ## Status
 
-Milestone 2 shipped — `search`, `ask`, and `schema` subcommands with the
-full workspace contract flag set (`--dry-run`, `--timeout`, `--json-errors`,
-`--rate-limit`, `--user-agent`, stdin `-`). See `docs/backlog/` for what's next.
+Milestone 3 shipped — `search` now targets the standalone `POST /search`
+endpoint (ranked web results, no AI answer). `ask` keeps chat-completions
+synthesis. All M2 contract flags (`--dry-run`, `--timeout`, `--json-errors`,
+`--rate-limit`, `--user-agent`, stdin `-`) apply to both. See
+`docs/backlog/` for what's next and `CHANGELOG.md` for the v0.4.0 break.
 
 ## Install
 
@@ -48,11 +50,24 @@ There is no config-file fallback. Missing env var exits with code `2`.
 
 ## Usage
 
-### `perplexity search` — classic Sonar search
+### `perplexity search` — ranked web results (no AI synthesis)
+
+Wraps `POST /search` and returns a list of ranked web results. No answer,
+no citations — those live on `ask`.
 
 ```sh
 perplexity search "what is the capital of France?"
+perplexity search "llm evals 2026" --max-results 20 --recency 1w
+perplexity search "raft consensus" --domain wikipedia.org --language en --country US
+perplexity search "ipo filings" --date-from 2024-01-01 --date-to 2024-12-31
+echo "nvidia earnings q4" | perplexity search -
 ```
+
+Flags (on `search`): `--max-results N` (1–20, default 10), `--country ISO`,
+`--language ISO` (ISO 639-1, repeatable, ≤10), `--domain DOMAIN` (repeatable,
+≤20), `--exclude-domain DOMAIN` (repeatable, ≤20; mutually exclusive with
+`--domain`), `--recency 1h|1d|1w|1m|1y` (mutually exclusive with
+`--date-from`/`--date-to`), `--date-from YYYY-MM-DD`, `--date-to YYYY-MM-DD`.
 
 ### `perplexity ask` — conversational answers (sonar-pro by default)
 
@@ -76,10 +91,10 @@ perplexity schema | jq .
 Returns the full command tree (flags, defaults, subcommands) as JSON.
 Agents should prefer this over scraping `--help`.
 
-Example output (compact by default, one JSON envelope per invocation):
+Example `search` output (compact by default, one JSON envelope per invocation):
 
 ```json
-{"schema_version":"1","provider":"perplexity","command":"search","elapsed_ms":1234,"result":{"answer":"The capital of France is Paris.","model":"sonar","citations":["https://en.wikipedia.org/wiki/Paris","https://www.britannica.com/place/Paris"]}}
+{"schema_version":"1","provider":"perplexity","command":"search","elapsed_ms":1234,"result":{"results":[{"title":"Paris","url":"https://en.wikipedia.org/wiki/Paris","snippet":"Paris is the capital of France.","published_date":"2024-01-15","domain":"en.wikipedia.org"}]}}
 ```
 
 Pretty-printed:
@@ -95,11 +110,14 @@ perplexity search "what is the capital of France?" --pretty
   "command": "search",
   "elapsed_ms": 1234,
   "result": {
-    "answer": "The capital of France is Paris.",
-    "model": "sonar",
-    "citations": [
-      "https://en.wikipedia.org/wiki/Paris",
-      "https://www.britannica.com/place/Paris"
+    "results": [
+      {
+        "title": "Paris",
+        "url": "https://en.wikipedia.org/wiki/Paris",
+        "snippet": "Paris is the capital of France.",
+        "published_date": "2024-01-15",
+        "domain": "en.wikipedia.org"
+      }
     ]
   }
 }
@@ -111,7 +129,14 @@ perplexity search "what is the capital of France?" --pretty
 
 | Flag | Scope | Default | Purpose |
 |---|---|---|---|
-| `--model` | `search` | `sonar` | Model name for search |
+| `--max-results N` | `search` | `10` | Number of ranked results (1–20) |
+| `--country ISO` | `search` | unset | Regional bias (e.g. `US`, `GB`) |
+| `--language ISO` | `search` | unset | ISO 639-1 language filter (e.g. `en`); repeatable, up to 10 entries |
+| `--domain DOMAIN` | `search` | unset | Restrict to domain (repeatable) |
+| `--exclude-domain DOMAIN` | `search` | unset | Exclude domain (repeatable) |
+| `--recency DURATION` | `search` | unset | `1h`, `1d`, `1w`, `1m`, `1y` |
+| `--date-from YYYY-MM-DD` | `search` | unset | Earliest publish date |
+| `--date-to YYYY-MM-DD` | `search` | unset | Latest publish date |
 | `--model` | `ask` | `sonar-pro` | Model name for ask |
 | `--max-tokens N` | `ask` | unset | Cap response tokens |
 | `--system <prompt>` | `ask` | unset | System prompt |
@@ -136,7 +161,7 @@ Any subcommand that takes a query also accepts `-` to read from stdin.
 
 ## Output contract
 
-- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. The per-command payload lives under `result` (for `search`: `answer`, `model`, `citations[]`).
+- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. Per-command payload under `result`: `search` → `{results[]{title,url,snippet,published_date,domain}}`; `ask` → `{answer, model, citations[]}`.
 - **stderr**: human-readable progress / errors only. No envelope on the error path.
 - **Exit codes**: `0` success, `1` API error (HTTP ≥ 400 after retries), `2` user/config error (e.g., missing env var), `3` network error.
 

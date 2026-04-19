@@ -6,11 +6,10 @@ _(work currently in flight)_
 
 ## Up Next
 
-1. [M3 — standalone `/search` endpoint](tasks/add-standalone-search-endpoint.md) — P1
-2. [M4 — `reason` subcommand](tasks/add-reason-subcommand.md) — P2
-3. [M5 — `research submit` + `research get` (async core)](tasks/add-async-research-submit-and-get.md) — P1
-4. [M6 — `research run` (blocking) + `jobs list`](tasks/add-research-run-and-jobs-list.md) — P2 (depends on M5)
-5. [M7 — enrichment flags](tasks/add-enrichment-flags.md) — P3 (depends on M5)
+1. [M4 — `reason` subcommand](tasks/add-reason-subcommand.md) — P2
+2. [M5 — `research submit` + `research get` (async core)](tasks/add-async-research-submit-and-get.md) — P1
+3. [M6 — `research run` (blocking) + `jobs list`](tasks/add-research-run-and-jobs-list.md) — P2 (depends on M5)
+4. [M7 — enrichment flags](tasks/add-enrichment-flags.md) — P3 (depends on M5)
 
 ## Backlog
 
