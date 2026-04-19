@@ -3,10 +3,12 @@ package client
 import "fmt"
 
 // Request is the chat-completions request body we send to Perplexity.
-// Only the fields M1 needs (model + messages) are exposed.
+// Only fields actively consumed by the CLI are exposed; unknowns are fine
+// for Perplexity to ignore on the wire.
 type Request struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model     string    `json:"model"`
+	Messages  []Message `json:"messages"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
 }
 
 // Message is one turn in the chat-completions messages array.

@@ -17,15 +17,21 @@ import (
 // DefaultEndpoint is the Perplexity chat-completions URL.
 const DefaultEndpoint = "https://api.perplexity.ai/chat/completions"
 
+// DefaultUserAgent is sent unless callers override it via WithUserAgent.
+const DefaultUserAgent = "perplexity-cli"
+
 // Client calls the Perplexity API. Construct with New.
 type Client struct {
 	httpClient *http.Client
 	endpoint   string
 	apiKey     string
+	userAgent  string
 	maxRetries int
 	// backoff returns the duration to sleep before retry attempt n (1-indexed).
 	// Exposed for tests; nil means use exponential default (250ms * 2^(n-1)).
 	backoff func(attempt int) time.Duration
+	// rateLimit is a channel that must receive before each HTTP call. nil = no limit.
+	rateLimit <-chan time.Time
 }
 
 // Option configures a Client.
@@ -51,6 +57,32 @@ func WithBackoff(fn func(attempt int) time.Duration) Option {
 	return func(c *Client) { c.backoff = fn }
 }
 
+// WithTimeout sets the per-request timeout on the underlying http.Client.
+func WithTimeout(d time.Duration) Option {
+	return func(c *Client) { c.httpClient.Timeout = d }
+}
+
+// WithUserAgent overrides the User-Agent header sent on every request.
+func WithUserAgent(ua string) Option {
+	return func(c *Client) {
+		if ua != "" {
+			c.userAgent = ua
+		}
+	}
+}
+
+// WithRateLimit throttles outgoing requests to n per second. 0 disables.
+// A simple ticker-based gate; non-bursty, good enough for a single-shot CLI.
+func WithRateLimit(perSec float64) Option {
+	return func(c *Client) {
+		if perSec <= 0 {
+			return
+		}
+		interval := time.Duration(float64(time.Second) / perSec)
+		c.rateLimit = time.Tick(interval)
+	}
+}
+
 // New constructs a Client. apiKey must be non-empty; callers should check env
 // before calling. A zero-value http.Client is used unless WithHTTPClient is passed.
 func New(apiKey string, opts ...Option) *Client {
@@ -58,6 +90,7 @@ func New(apiKey string, opts ...Option) *Client {
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 		endpoint:   DefaultEndpoint,
 		apiKey:     apiKey,
+		userAgent:  DefaultUserAgent,
 		maxRetries: 3,
 	}
 	for _, o := range opts {
@@ -88,7 +121,6 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 	}
 
 	var lastErr error
-	// attempt 0 is the initial try; 1..maxRetries are retries.
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -97,10 +129,16 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 			case <-time.After(c.backoff(attempt)):
 			}
 		}
+		if c.rateLimit != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-c.rateLimit:
+			}
+		}
 
 		resp, err := c.do(ctx, body)
 		if err != nil {
-			// Network-level error: retry if we still can.
 			lastErr = err
 			if attempt == c.maxRetries {
 				return nil, err
@@ -108,7 +146,6 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 			continue
 		}
 
-		// Decide based on status.
 		if resp.status >= 500 || resp.status == http.StatusTooManyRequests {
 			lastErr = &APIError{Status: resp.status, Body: string(resp.body)}
 			if attempt == c.maxRetries {
@@ -117,7 +154,6 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 			continue
 		}
 		if resp.status >= 400 {
-			// 4xx other than 429: do not retry.
 			return nil, &APIError{Status: resp.status, Body: string(resp.body)}
 		}
 
@@ -128,7 +164,6 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 		return &out, nil
 	}
 
-	// Unreachable, but keep the compiler happy.
 	if lastErr == nil {
 		lastErr = errors.New("perplexity: no attempts made")
 	}
@@ -142,14 +177,10 @@ type rawResponse struct {
 
 // do performs a single HTTP request and reads the full body.
 func (c *Client) do(ctx context.Context, body []byte) (*rawResponse, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	httpReq, err := c.buildHTTPRequest(ctx, body)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
@@ -161,4 +192,34 @@ func (c *Client) do(ctx context.Context, body []byte) (*rawResponse, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	return &rawResponse{status: resp.StatusCode, body: b}, nil
+}
+
+func (c *Client) buildHTTPRequest(ctx context.Context, body []byte) (*http.Request, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", c.userAgent)
+	return httpReq, nil
+}
+
+// Dump returns a human-readable trace of the request that Complete would send.
+// The Authorization header is redacted; body is the serialized JSON. Intended
+// for --dry-run and --verbose output. No network call is made.
+func (c *Client) Dump(req Request) (string, error) {
+	body, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "POST %s\n", c.endpoint)
+	fmt.Fprintf(&buf, "Authorization: Bearer ***REDACTED***\n")
+	fmt.Fprintf(&buf, "Content-Type: application/json\n")
+	fmt.Fprintf(&buf, "Accept: application/json\n")
+	fmt.Fprintf(&buf, "User-Agent: %s\n", c.userAgent)
+	fmt.Fprintf(&buf, "\n%s\n", body)
+	return buf.String(), nil
 }

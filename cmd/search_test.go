@@ -4,16 +4,49 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sapihav/perplexity-cli/internal/client"
 )
 
+func TestRunSearch_HappyPath_WritesEnvelope(t *testing.T) {
+	resetGlobals(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"sonar","choices":[{"message":{"content":"Paris."}}],"citations":["https://w"]}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("PERPLEXITY_API_KEY", "k")
+	extraClientOptions = []client.Option{client.WithEndpoint(srv.URL), client.WithBackoff(func(int) time.Duration { return 0 })}
+	defer func() { extraClientOptions = nil }()
+
+	var stdout, stderr bytes.Buffer
+	f := &searchFlags{model: "sonar"}
+	if err := runSearch(context.Background(), &stdout, &stderr, "capital of france?", f); err != nil {
+		t.Fatalf("runSearch: %v\n%s", err, stderr.String())
+	}
+	var env map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("stdout not JSON: %v\n%s", err, stdout.String())
+	}
+	if env["command"] != "search" {
+		t.Errorf("command = %v, want search", env["command"])
+	}
+	result := env["result"].(map[string]any)
+	if result["answer"] != "Paris." {
+		t.Errorf("answer = %v", result["answer"])
+	}
+}
+
 func TestRunSearch_MissingAPIKey_ExitsCode2(t *testing.T) {
-	// Ensure env is clean for this test.
 	t.Setenv("PERPLEXITY_API_KEY", "")
 
 	var stdout, stderr bytes.Buffer
-	f := &searchFlags{model: "sonar", maxRetries: 0}
+	f := &searchFlags{model: "sonar"}
 	err := runSearch(context.Background(), &stdout, &stderr, "hello", f)
 	if err == nil {
 		t.Fatal("expected error when PERPLEXITY_API_KEY is unset")
@@ -49,7 +82,7 @@ func TestWriteJSON_EnvelopeShape(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := writeJSON(&buf, env, &searchFlags{}); err != nil {
+	if err := writeJSON(&buf, env); err != nil {
 		t.Fatalf("writeJSON: %v", err)
 	}
 

@@ -2,7 +2,7 @@
 title: M2 — `ask` subcommand + contract flag hardening
 type: task
 priority: P1
-status: todo
+status: done
 created: 2026-04-18
 ---
 

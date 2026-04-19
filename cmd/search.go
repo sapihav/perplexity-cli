@@ -2,31 +2,16 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
-	"os"
 	"time"
 
 	"github.com/sapihav/perplexity-cli/internal/client"
 	"github.com/spf13/cobra"
 )
 
-// envelope is the stable stdout wrapper around every successful command result.
-// Field order mirrors the contract documented in README.md / CLAUDE.md.
-type envelope struct {
-	SchemaVersion string `json:"schema_version"`
-	Provider      string `json:"provider"`
-	Command       string `json:"command"`
-	ElapsedMs     int64  `json:"elapsed_ms"`
-	Result        any    `json:"result"`
-}
-
 // searchOutput is what we put in envelope.result on success: answer + citations,
-// plus the resolved model for convenience. Kept intentionally small per M1.
+// plus the resolved model for convenience.
 type searchOutput struct {
 	Answer    string   `json:"answer"`
 	Model     string   `json:"model"`
@@ -34,12 +19,7 @@ type searchOutput struct {
 }
 
 type searchFlags struct {
-	model      string
-	maxRetries int
-	verbose    bool
-	quiet      bool
-	pretty     bool
-	out        string
+	model string
 }
 
 func newSearchCmd() *cobra.Command {
@@ -52,125 +32,58 @@ func newSearchCmd() *cobra.Command {
 			return runSearch(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], f)
 		},
 	}
-	c.Flags().StringVar(&f.model, "model", "sonar", "Perplexity model to use")
-	c.Flags().IntVar(&f.maxRetries, "max-retries", 3, "Retries on 429/5xx with exponential backoff")
-	c.Flags().BoolVarP(&f.verbose, "verbose", "v", false, "Verbose progress logging to stderr")
-	c.Flags().BoolVarP(&f.quiet, "quiet", "q", false, "Suppress non-error stderr output")
-	c.Flags().BoolVar(&f.pretty, "pretty", false, "Indent JSON output")
-	c.Flags().StringVar(&f.out, "out", "", "Write JSON to this file instead of stdout")
+	c.Flags().StringVar(&f.model, "model", "sonar", "Perplexity model to use (sonar | sonar-pro)")
 	return c
 }
 
 func runSearch(ctx context.Context, stdout, stderr io.Writer, query string, f *searchFlags) error {
 	start := time.Now()
-	apiKey := os.Getenv("PERPLEXITY_API_KEY")
+	query, err := readStdinIfDash(query)
+	if err != nil {
+		errorOut(stderr, 1, err.Error())
+		return err
+	}
+
+	apiKey := requireAPIKey(stderr)
 	if apiKey == "" {
-		setExit(2)
-		fmt.Fprintln(stderr, "error: PERPLEXITY_API_KEY is not set")
-		fmt.Fprintln(stderr, "       Create a key at https://www.perplexity.ai/settings/api and export it:")
-		fmt.Fprintln(stderr, "         export PERPLEXITY_API_KEY=pplx-...")
-		return errors.New("missing PERPLEXITY_API_KEY")
+		return fmt.Errorf("missing PERPLEXITY_API_KEY")
 	}
 
-	logf := func(format string, a ...any) {
-		if f.verbose && !f.quiet {
-			fmt.Fprintf(stderr, "perplexity: "+format+"\n", a...)
+	logf(stderr, "model=%s max_retries=%d rate_limit=%.2f/s", f.model, g.maxRetries, g.rateLimit)
+
+	c := client.New(apiKey, clientOptions()...)
+	req := client.Request{
+		Model:    f.model,
+		Messages: []client.Message{{Role: "user", Content: query}},
+	}
+
+	if g.dryRun {
+		dump, err := c.Dump(req)
+		if err != nil {
+			errorOut(stderr, 1, err.Error())
+			return err
 		}
+		fmt.Fprint(stdout, dump)
+		return nil
 	}
-	logf("model=%s max_retries=%d", f.model, f.maxRetries)
 
-	c := client.New(apiKey, client.WithMaxRetries(f.maxRetries))
-
-	resp, err := c.Complete(ctx, client.Request{
-		Model: f.model,
-		Messages: []client.Message{
-			{Role: "user", Content: query},
-		},
-	})
+	resp, err := c.Complete(ctx, req)
 	if err != nil {
 		return handleClientError(stderr, err)
 	}
 
-	out := searchOutput{
-		Model:     resp.Model,
-		Citations: resp.Citations,
-	}
+	out := searchOutput{Model: resp.Model, Citations: resp.Citations}
 	if out.Citations == nil {
 		out.Citations = []string{}
 	}
 	if len(resp.Choices) > 0 {
 		out.Answer = resp.Choices[0].Message.Content
 	}
-
-	env := envelope{
+	return writeJSON(stdout, envelope{
 		SchemaVersion: "1",
 		Provider:      "perplexity",
 		Command:       "search",
 		ElapsedMs:     time.Since(start).Milliseconds(),
 		Result:        out,
-	}
-	return writeJSON(stdout, env, f)
-}
-
-// handleClientError maps a client error to our exit-code taxonomy and prints
-// a short human-readable line to stderr. It always returns the error unchanged
-// so the caller can propagate it.
-func handleClientError(stderr io.Writer, err error) error {
-	var apiErr *client.APIError
-	if errors.As(err, &apiErr) {
-		setExit(1)
-		fmt.Fprintf(stderr, "error: perplexity API returned HTTP %d\n", apiErr.Status)
-		if apiErr.Body != "" {
-			fmt.Fprintf(stderr, "       body: %s\n", truncate(apiErr.Body, 500))
-		}
-		return err
-	}
-	// Anything that looks network-ish is a network error.
-	var urlErr *url.Error
-	var netErr net.Error
-	if errors.As(err, &urlErr) || errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) {
-		setExit(3)
-		fmt.Fprintf(stderr, "error: network failure: %v\n", err)
-		return err
-	}
-	// Default: treat as API error (e.g., JSON decode).
-	setExit(1)
-	fmt.Fprintf(stderr, "error: %v\n", err)
-	return err
-}
-
-func writeJSON(stdout io.Writer, v any, f *searchFlags) error {
-	var data []byte
-	var err error
-	if f.pretty {
-		data, err = json.MarshalIndent(v, "", "  ")
-	} else {
-		data, err = json.Marshal(v)
-	}
-	if err != nil {
-		setExit(1)
-		return fmt.Errorf("marshal output: %w", err)
-	}
-	data = append(data, '\n')
-
-	if f.out != "" {
-		// #nosec G306 -- 0o644 is fine for user-chosen output file.
-		if err := os.WriteFile(f.out, data, 0o644); err != nil {
-			setExit(1)
-			return fmt.Errorf("write %s: %w", f.out, err)
-		}
-		return nil
-	}
-	if _, err := stdout.Write(data); err != nil {
-		setExit(1)
-		return err
-	}
-	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+	})
 }

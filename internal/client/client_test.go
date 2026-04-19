@@ -24,7 +24,9 @@ func TestComplete_HappyPath(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", got)
 		}
-		// Echo the model back to prove the request body round-tripped.
+		if got := r.Header.Get("User-Agent"); got != "perplexity-cli" {
+			t.Errorf("User-Agent = %q, want perplexity-cli", got)
+		}
 		body, _ := io.ReadAll(r.Body)
 		var got Request
 		if err := json.Unmarshal(body, &got); err != nil {
@@ -33,7 +35,6 @@ func TestComplete_HappyPath(t *testing.T) {
 		if got.Model != "sonar" || len(got.Messages) != 1 || got.Messages[0].Content != "hello" {
 			t.Errorf("unexpected request body: %+v", got)
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"model": "sonar",
@@ -132,7 +133,6 @@ func TestComplete_GivesUpAfterMaxRetries(t *testing.T) {
 	if apiErr.Status != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want 429", apiErr.Status)
 	}
-	// initial + 2 retries = 3 calls total
 	if got := calls.Load(); got != 3 {
 		t.Errorf("calls = %d, want 3", got)
 	}
@@ -164,6 +164,38 @@ func TestComplete_DoesNotRetryOn400(t *testing.T) {
 	}
 }
 
+func TestComplete_401Unauthorized_NoRetry(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithMaxRetries(3))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar", Messages: []Message{{Role: "user", Content: "q"}}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized {
+		t.Fatalf("want APIError status 401, got %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1", got)
+	}
+}
+
+func TestComplete_Timeout_WrapsAsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithMaxRetries(0), WithTimeout(20*time.Millisecond))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar", Messages: []Message{{Role: "user", Content: "q"}}})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+}
+
 func TestComplete_RespectsContextCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -171,12 +203,74 @@ func TestComplete_RespectsContextCancellation(t *testing.T) {
 	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 
 	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff))
 	_, err := c.Complete(ctx, Request{Model: "sonar", Messages: []Message{{Role: "user", Content: "q"}}})
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
+	}
+}
+
+func TestWithUserAgent_OverridesHeader(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"model":"sonar","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithUserAgent("my-agent/1.2.3"))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar", Messages: []Message{{Role: "user", Content: "q"}}})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotUA != "my-agent/1.2.3" {
+		t.Errorf("UA = %q, want my-agent/1.2.3", gotUA)
+	}
+}
+
+func TestDump_RedactsAuthorization(t *testing.T) {
+	c := New("super-secret-key", WithEndpoint("https://example.test/chat/completions"))
+	out, err := c.Dump(Request{Model: "sonar-pro", Messages: []Message{{Role: "user", Content: "hi"}}, MaxTokens: 64})
+	if err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	if strings.Contains(out, "super-secret-key") {
+		t.Errorf("Dump leaked API key: %q", out)
+	}
+	if !strings.Contains(out, "Authorization: Bearer ***REDACTED***") {
+		t.Errorf("Dump missing redacted Authorization: %q", out)
+	}
+	if !strings.Contains(out, "POST https://example.test/chat/completions") {
+		t.Errorf("Dump missing endpoint line: %q", out)
+	}
+	if !strings.Contains(out, `"max_tokens": 64`) {
+		t.Errorf("Dump missing body field: %q", out)
+	}
+}
+
+func TestWithRateLimit_EnforcesInterval(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"model":"sonar","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	// 50/s => 20ms interval. 3 requests must take at least ~40ms (2 gaps).
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithRateLimit(50))
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		if _, err := c.Complete(context.Background(), Request{Model: "sonar", Messages: []Message{{Role: "user", Content: "q"}}}); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Errorf("rate limit too loose: 3 calls took %v, want >=30ms", elapsed)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("calls = %d, want 3", got)
 	}
 }
 
