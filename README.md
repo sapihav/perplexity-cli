@@ -4,6 +4,10 @@ Thin Go CLI wrapping the [Perplexity](https://www.perplexity.ai/) Sonar API. Ret
 
 Binary name: `perplexity` (not `perplexity-cli`).
 
+## Parity
+
+`███████████████░░░░░` **75%** — `search`, `ask`, `reason` shipped (3 of 4 MCP tools). Async deep `research` (M5/M6) remains. See [PARITY.md](PARITY.md).
+
 ## Status
 
 Milestone 4 shipped — added `reason` (chain-of-thought via
