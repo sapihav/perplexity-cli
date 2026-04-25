@@ -4,6 +4,29 @@ All notable changes to `perplexity-cli` are recorded here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com); the project uses
 [Semantic Versioning](https://semver.org).
 
+## v0.5.0 — 2026-04-25
+
+### Added
+
+- `perplexity reason <query>` — chain-of-thought subcommand backed by
+  `sonar-reasoning-pro` (closes parity with the official MCP
+  `perplexity_reason` tool). Same flag set as `ask` (`--system`,
+  `--messages @file.json`, `--max-tokens`) plus `--strip-thinking`
+  (default `true`) which extracts `<think>...</think>` /
+  `<thinking>...</thinking>` blocks from the response and surfaces them
+  under `result.thinking`. Pass `--strip-thinking=false` to keep the raw
+  content in `result.answer`. `--model` defaults to `sonar-reasoning-pro`
+  and accepts `sonar-reasoning` for the smaller variant.
+- Internal: `runChatCompletion` shared helper now backs both `ask` and
+  `reason` so the chat-completions code path is parameterized over model
+  with a single implementation.
+
+### Output payload
+
+- `reason` → `{answer, thinking?, model, citations[]}` under the standard
+  envelope. `thinking` is omitted when `--strip-thinking=false` or when
+  the upstream response carries no `<think>` block.
+
 ## v0.4.0 — 2026-04-19
 
 ### Breaking changes

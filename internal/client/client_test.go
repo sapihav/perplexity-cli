@@ -347,6 +347,137 @@ func TestDumpSearch_RedactsAuthorizationAndTargetsSearch(t *testing.T) {
 	}
 }
 
+// TestComplete_ReasoningModel_RoundTripsThinkBlock verifies that the shared
+// chat-completions path is parameterized over Request.Model (no per-model
+// branching). Sending sonar-reasoning-pro and receiving content with a
+// <think>...</think> prefix should round-trip verbatim through Complete; tag
+// stripping is a CLI-layer concern, not a client-layer one.
+func TestComplete_ReasoningModel_RoundTripsThinkBlock(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var got Request
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("could not parse request: %v", err)
+		}
+		if got.Model != "sonar-reasoning-pro" {
+			t.Errorf("Model = %q, want sonar-reasoning-pro", got.Model)
+		}
+		_, _ = w.Write([]byte(`{
+			"model": "sonar-reasoning-pro",
+			"choices": [{"message": {"role": "assistant", "content": "<think>chain of thought</think>final"}}],
+			"citations": ["https://example.com/x"]
+		}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	resp, err := c.Complete(context.Background(), Request{
+		Model:    "sonar-reasoning-pro",
+		Messages: []Message{{Role: "user", Content: "why is the sky blue?"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Model != "sonar-reasoning-pro" {
+		t.Errorf("resp.Model = %q", resp.Model)
+	}
+	if len(resp.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(resp.Choices))
+	}
+	content := resp.Choices[0].Message.Content
+	if !strings.Contains(content, "<think>chain of thought</think>") {
+		t.Errorf("client must not strip <think> blocks; got %q", content)
+	}
+	if !strings.Contains(content, "final") {
+		t.Errorf("missing final answer: %q", content)
+	}
+	if len(resp.Citations) != 1 {
+		t.Errorf("citations = %v", resp.Citations)
+	}
+}
+
+// TestComplete_ReasoningModel_MalformedJSON ensures the chat path surfaces a
+// decode error (not a panic) when the upstream returns garbage. Same code path
+// as `ask`, but exercised on the reasoning-model parameterization.
+func TestComplete_ReasoningModel_MalformedJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{not valid json`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar-reasoning-pro", Messages: []Message{{Role: "user", Content: "q"}}})
+	if err == nil {
+		t.Fatal("expected decode error")
+	}
+	if !strings.Contains(err.Error(), "decode") {
+		t.Errorf("error %q should mention decode", err.Error())
+	}
+}
+
+// TestComplete_ReasoningModel_5xxRetryThenAPIError exercises the retry loop
+// against the reasoning model: persistent 503 must surface as *APIError after
+// retries are exhausted, with the same semantics as plain `ask`.
+func TestComplete_ReasoningModel_5xxRetryThenAPIError(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"down"}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithMaxRetries(2))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar-reasoning-pro", Messages: []Message{{Role: "user", Content: "q"}}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable {
+		t.Fatalf("want APIError 503, got %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("calls = %d, want 3 (initial + 2 retries)", got)
+	}
+}
+
+// TestComplete_ReasoningModel_4xxNoRetry mirrors TestComplete_DoesNotRetryOn400
+// but for the reasoning model — 4xx must short-circuit immediately.
+func TestComplete_ReasoningModel_4xxNoRetry(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"nope"}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithMaxRetries(3))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar-reasoning-pro", Messages: []Message{{Role: "user", Content: "q"}}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
+		t.Fatalf("want APIError 400, got %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1 (no retry on 4xx)", got)
+	}
+}
+
+// TestComplete_ReasoningModel_TransportError ensures a connect failure is
+// surfaced as a non-APIError (network) for the reasoning model path.
+func TestComplete_ReasoningModel_TransportError(t *testing.T) {
+	// Closed server: dial succeeds momentarily then connection is refused.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	c := New("k", WithEndpoint(srv.URL), WithBackoff(zeroBackoff), WithMaxRetries(0))
+	_, err := c.Complete(context.Background(), Request{Model: "sonar-reasoning-pro", Messages: []Message{{Role: "user", Content: "q"}}})
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Errorf("transport error should not be *APIError: %v", err)
+	}
+}
+
 func TestDefaultBackoff_IsExponential(t *testing.T) {
 	cases := []struct {
 		attempt int

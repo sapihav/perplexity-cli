@@ -6,11 +6,12 @@ Binary name: `perplexity` (not `perplexity-cli`).
 
 ## Status
 
-Milestone 3 shipped — `search` now targets the standalone `POST /search`
-endpoint (ranked web results, no AI answer). `ask` keeps chat-completions
+Milestone 4 shipped — added `reason` (chain-of-thought via
+`sonar-reasoning-pro`, with optional `<think>` block extraction). M3 brought
+the standalone `POST /search` endpoint; `ask` keeps chat-completions
 synthesis. All M2 contract flags (`--dry-run`, `--timeout`, `--json-errors`,
-`--rate-limit`, `--user-agent`, stdin `-`) apply to both. See
-`docs/backlog/` for what's next and `CHANGELOG.md` for the v0.4.0 break.
+`--rate-limit`, `--user-agent`, stdin `-`) apply to every subcommand. See
+`docs/backlog/` for what's next and `CHANGELOG.md` for release notes.
 
 ## Install
 
@@ -82,6 +83,19 @@ perplexity ask "rewrite this prompt" --system "You are a terse editor" --max-tok
 `{role, content}` objects; the positional query is appended as the final
 user turn.
 
+### `perplexity reason` — step-by-step reasoning (sonar-reasoning-pro)
+
+```sh
+perplexity reason "if a train leaves Paris at 9am at 200km/h, when does it reach Lyon?"
+perplexity reason "explain RCU vs spinlocks" --strip-thinking=false   # keep raw <think> in answer
+perplexity reason "tricky math problem" --model sonar-reasoning       # smaller reasoning model
+echo "why is the sky blue?" | perplexity reason -
+```
+
+The reasoning models emit a `<think>...</think>` chain-of-thought block followed by the final answer in the same content stream. By default the CLI splits them: the cleaned final answer goes to `result.answer`, the chain-of-thought to `result.thinking`. Pass `--strip-thinking=false` to receive the raw content unchanged (and no `thinking` field).
+
+`reason` output payload: `{answer, thinking?, model, citations[]}`.
+
 ### `perplexity schema` — self-describing command tree
 
 ```sh
@@ -141,6 +155,11 @@ perplexity search "what is the capital of France?" --pretty
 | `--max-tokens N` | `ask` | unset | Cap response tokens |
 | `--system <prompt>` | `ask` | unset | System prompt |
 | `--messages @file.json` | `ask` | unset | Prior conversation (array of `{role,content}`) |
+| `--model` | `reason` | `sonar-reasoning-pro` | Reasoning model (`sonar-reasoning-pro` \| `sonar-reasoning`) |
+| `--max-tokens N` | `reason` | unset | Cap response tokens |
+| `--system <prompt>` | `reason` | unset | System prompt |
+| `--messages @file.json` | `reason` | unset | Prior conversation (array of `{role,content}`) |
+| `--strip-thinking` | `reason` | `true` | Strip `<think>...</think>` from `result.answer` and surface it under `result.thinking` |
 
 ### Global (persistent on every subcommand)
 
@@ -161,7 +180,7 @@ Any subcommand that takes a query also accepts `-` to read from stdin.
 
 ## Output contract
 
-- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. Per-command payload under `result`: `search` → `{results[]{title,url,snippet,published_date,domain}}`; `ask` → `{answer, model, citations[]}`.
+- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. Per-command payload under `result`: `search` → `{results[]{title,url,snippet,published_date,domain}}`; `ask` → `{answer, model, citations[]}`; `reason` → `{answer, thinking?, model, citations[]}`.
 - **stderr**: human-readable progress / errors only. No envelope on the error path.
 - **Exit codes**: `0` success, `1` API error (HTTP ≥ 400 after retries), `2` user/config error (e.g., missing env var), `3` network error.
 

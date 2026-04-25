@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sapihav/perplexity-cli/internal/client"
 )
@@ -87,6 +88,92 @@ func buildMessages(system string, prior []client.Message, query string) ([]clien
 	}
 	return msgs, nil
 }
+
+// chatFlags is the subset of ask/reason flags consumed by the shared runner.
+// Reason adds its own --strip-thinking on top of these, but the wire-level
+// request shape is identical, so we factor everything else out.
+type chatFlags struct {
+	model        string
+	maxTokens    int
+	system       string
+	messagesFile string
+}
+
+// chatCallResult is the output of runChatCompletion: the API response (nil on
+// dry-run) plus the assembled message list (useful for tests / verbose logs).
+type chatCallResult struct {
+	Resp     *client.Response
+	Messages []client.Message
+}
+
+// runChatCompletion is the shared core of `ask` and `reason`. It resolves
+// stdin, loads --messages, builds the request, and either dumps it (--dry-run)
+// or sends it. On dry-run it writes the dump to stdout and returns (nil, nil).
+// On success it returns the parsed response. Errors are already reported to
+// stderr with the right exit code; the caller just propagates them.
+func runChatCompletion(ctx context.Context, stdout, stderr io.Writer, query string, f *chatFlags) (*chatCallResult, error) {
+	q, err := readStdinIfDash(query)
+	if err != nil {
+		errorOut(stderr, 1, err.Error())
+		return nil, err
+	}
+
+	var prior []client.Message
+	if f.messagesFile != "" {
+		prior, err = loadMessagesFile(f.messagesFile)
+		if err != nil {
+			errorOut(stderr, 2, err.Error())
+			return nil, err
+		}
+	}
+
+	msgs, err := buildMessages(f.system, prior, q)
+	if err != nil {
+		errorOut(stderr, 2, err.Error())
+		return nil, err
+	}
+
+	apiKey := requireAPIKey(stderr)
+	if apiKey == "" {
+		return nil, fmt.Errorf("missing PERPLEXITY_API_KEY")
+	}
+
+	logf(stderr, "model=%s max_tokens=%d turns=%d", f.model, f.maxTokens, len(msgs))
+
+	c := client.New(apiKey, clientOptions()...)
+	req := client.Request{Model: f.model, Messages: msgs, MaxTokens: f.maxTokens}
+
+	if g.dryRun {
+		dump, err := c.Dump(req)
+		if err != nil {
+			errorOut(stderr, 1, err.Error())
+			return nil, err
+		}
+		fmt.Fprint(stdout, dump)
+		return nil, nil
+	}
+
+	resp, err := c.Complete(ctx, req)
+	if err != nil {
+		return nil, handleClientError(stderr, err)
+	}
+	return &chatCallResult{Resp: resp, Messages: msgs}, nil
+}
+
+// firstChoiceContent returns the assistant content of the first choice, or ""
+// when the response carries no choices. Centralizing this keeps both ask and
+// reason resilient to malformed/empty upstream responses without panicking.
+func firstChoiceContent(r *client.Response) string {
+	if r == nil || len(r.Choices) == 0 {
+		return ""
+	}
+	return r.Choices[0].Message.Content
+}
+
+// nowSinceMs is a tiny helper so callers can keep `start := time.Now()` at the
+// top and emit the envelope with a single call. Kept here (not in root.go) to
+// stay close to the chat helpers that use it.
+func nowSinceMs(start time.Time) int64 { return time.Since(start).Milliseconds() }
 
 // handleClientError maps a client error to our exit-code taxonomy and prints
 // a user-facing line (respecting --json-errors). Returns the error unchanged.

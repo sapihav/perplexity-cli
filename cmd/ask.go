@@ -2,11 +2,9 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"time"
 
-	"github.com/sapihav/perplexity-cli/internal/client"
 	"github.com/spf13/cobra"
 )
 
@@ -18,12 +16,9 @@ type askOutput struct {
 	Citations []string `json:"citations"`
 }
 
-type askFlags struct {
-	model        string
-	maxTokens    int
-	system       string
-	messagesFile string
-}
+// askFlags is just chatFlags — kept as a type alias-ish wrapper so existing
+// tests that build &askFlags{...} keep compiling without churn.
+type askFlags = chatFlags
 
 func newAskCmd() *cobra.Command {
 	f := &askFlags{}
@@ -51,64 +46,29 @@ Use --messages @file.json for multi-turn dialogs; --system sets a system prompt.
 
 func runAsk(ctx context.Context, stdout, stderr io.Writer, query string, f *askFlags) error {
 	start := time.Now()
-	query, err := readStdinIfDash(query)
+	res, err := runChatCompletion(ctx, stdout, stderr, query, f)
 	if err != nil {
-		errorOut(stderr, 1, err.Error())
 		return err
 	}
-
-	var prior []client.Message
-	if f.messagesFile != "" {
-		prior, err = loadMessagesFile(f.messagesFile)
-		if err != nil {
-			errorOut(stderr, 2, err.Error())
-			return err
-		}
-	}
-
-	msgs, err := buildMessages(f.system, prior, query)
-	if err != nil {
-		errorOut(stderr, 2, err.Error())
-		return err
-	}
-
-	apiKey := requireAPIKey(stderr)
-	if apiKey == "" {
-		return fmt.Errorf("missing PERPLEXITY_API_KEY")
-	}
-
-	logf(stderr, "model=%s max_tokens=%d turns=%d", f.model, f.maxTokens, len(msgs))
-
-	c := client.New(apiKey, clientOptions()...)
-	req := client.Request{Model: f.model, Messages: msgs, MaxTokens: f.maxTokens}
-
-	if g.dryRun {
-		dump, err := c.Dump(req)
-		if err != nil {
-			errorOut(stderr, 1, err.Error())
-			return err
-		}
-		fmt.Fprint(stdout, dump)
+	if res == nil {
+		// dry-run: dump already written to stdout
 		return nil
 	}
 
-	resp, err := c.Complete(ctx, req)
-	if err != nil {
-		return handleClientError(stderr, err)
+	citations := res.Resp.Citations
+	if citations == nil {
+		citations = []string{}
 	}
-
-	out := askOutput{Model: resp.Model, Citations: resp.Citations}
-	if out.Citations == nil {
-		out.Citations = []string{}
-	}
-	if len(resp.Choices) > 0 {
-		out.Answer = resp.Choices[0].Message.Content
+	out := askOutput{
+		Answer:    firstChoiceContent(res.Resp),
+		Model:     res.Resp.Model,
+		Citations: citations,
 	}
 	return writeJSON(stdout, envelope{
 		SchemaVersion: "1",
 		Provider:      "perplexity",
 		Command:       "ask",
-		ElapsedMs:     time.Since(start).Milliseconds(),
+		ElapsedMs:     nowSinceMs(start),
 		Result:        out,
 	})
 }
