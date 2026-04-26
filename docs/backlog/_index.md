@@ -6,9 +6,8 @@ _(work currently in flight)_
 
 ## Up Next
 
-1. [M5 — `research submit` + `research get` (async core)](tasks/add-async-research-submit-and-get.md) — P1
-2. [M6 — `research run` (blocking) + `jobs list`](tasks/add-research-run-and-jobs-list.md) — P2 (depends on M5)
-3. [M7 — enrichment flags](tasks/add-enrichment-flags.md) — P3 (depends on M5)
+1. [M6 — `research run` (blocking) + `jobs list`](tasks/add-research-run-and-jobs-list.md) — P2 (depends on M5)
+2. [M7 — enrichment flags](tasks/add-enrichment-flags.md) — P3 (depends on M5)
 
 ## Backlog
 

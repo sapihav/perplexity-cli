@@ -478,6 +478,197 @@ func TestComplete_ReasoningModel_TransportError(t *testing.T) {
 	}
 }
 
+func TestAsyncSubmit_HappyPath(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if got := r.Header.Get("Authorization"); got != "Bearer k" {
+			t.Errorf("Authorization = %q", got)
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req AsyncRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("body not JSON: %v", err)
+		}
+		if req.Request.Model != "sonar-deep-research" || req.Request.ReasoningEffort != "high" {
+			t.Errorf("unexpected req: %+v", req)
+		}
+		_, _ = w.Write([]byte(`{"id":"job-1","model":"sonar-deep-research","status":"CREATED","created_at":1700000000}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL+"/async/chat/completions"), WithBackoff(zeroBackoff))
+	job, err := c.AsyncSubmit(context.Background(), AsyncRequest{Request: AsyncChatRequest{
+		Model:           "sonar-deep-research",
+		Messages:        []Message{{Role: "user", Content: "deep dive"}},
+		ReasoningEffort: "high",
+	}})
+	if err != nil {
+		t.Fatalf("AsyncSubmit: %v", err)
+	}
+	if gotMethod != "POST" {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/async/chat/completions" {
+		t.Errorf("path = %q, want /async/chat/completions", gotPath)
+	}
+	if job.ID != "job-1" || job.Status != "CREATED" {
+		t.Errorf("job = %+v", job)
+	}
+}
+
+func TestAsyncSubmit_RetriesOn5xx(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"j","model":"sonar-deep-research","status":"CREATED","created_at":1}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	job, err := c.AsyncSubmit(context.Background(), AsyncRequest{Request: AsyncChatRequest{Model: "sonar-deep-research", Messages: []Message{{Role: "user", Content: "q"}}}})
+	if err != nil {
+		t.Fatalf("AsyncSubmit: %v", err)
+	}
+	if job.ID != "j" {
+		t.Errorf("job.ID = %q", job.ID)
+	}
+}
+
+func TestAsyncSubmit_APIError_PropagatesAsAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad"}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	_, err := c.AsyncSubmit(context.Background(), AsyncRequest{Request: AsyncChatRequest{Model: "sonar-deep-research", Messages: []Message{{Role: "user", Content: "q"}}}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest {
+		t.Fatalf("want APIError 400, got %v", err)
+	}
+}
+
+func TestAsyncSubmit_DecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{not json`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	_, err := c.AsyncSubmit(context.Background(), AsyncRequest{Request: AsyncChatRequest{Model: "sonar-deep-research", Messages: []Message{{Role: "user", Content: "q"}}}})
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("want decode error, got %v", err)
+	}
+}
+
+func TestAsyncGet_HappyPath(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		// GET should not carry Content-Type since there's no body.
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("GET should omit Content-Type; got %q", got)
+		}
+		_, _ = w.Write([]byte(`{"id":"job-x","model":"sonar-deep-research","status":"COMPLETED","created_at":1,"completed_at":2,"response":{"model":"sonar-deep-research","choices":[{"message":{"content":"final"}}],"citations":["https://e.com"]}}`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL+"/async/chat/completions"), WithBackoff(zeroBackoff))
+	job, err := c.AsyncGet(context.Background(), "job-x")
+	if err != nil {
+		t.Fatalf("AsyncGet: %v", err)
+	}
+	if gotMethod != "GET" {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/async/chat/completions/job-x" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if job.Status != "COMPLETED" || job.Response == nil {
+		t.Errorf("job = %+v", job)
+	}
+	if job.Response.Choices[0].Message.Content != "final" {
+		t.Errorf("content = %q", job.Response.Choices[0].Message.Content)
+	}
+}
+
+func TestAsyncGet_EmptyID(t *testing.T) {
+	c := New("k")
+	_, err := c.AsyncGet(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for empty id")
+	}
+}
+
+func TestAsyncGet_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	_, err := c.AsyncGet(context.Background(), "missing")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Fatalf("want APIError 404, got %v", err)
+	}
+}
+
+func TestAsyncGet_DecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not json at all`))
+	}))
+	defer srv.Close()
+
+	c := New("k", WithAsyncEndpoint(srv.URL), WithBackoff(zeroBackoff))
+	_, err := c.AsyncGet(context.Background(), "job-x")
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("want decode error, got %v", err)
+	}
+}
+
+func TestDumpAsyncSubmit_RedactsAuthorization(t *testing.T) {
+	c := New("super-secret-key", WithAsyncEndpoint("https://example.test/async/chat/completions"))
+	out, err := c.DumpAsyncSubmit(AsyncRequest{Request: AsyncChatRequest{
+		Model:           "sonar-deep-research",
+		Messages:        []Message{{Role: "user", Content: "hi"}},
+		ReasoningEffort: "low",
+	}})
+	if err != nil {
+		t.Fatalf("DumpAsyncSubmit: %v", err)
+	}
+	if strings.Contains(out, "super-secret-key") {
+		t.Errorf("dump leaked api key: %q", out)
+	}
+	if !strings.Contains(out, "POST https://example.test/async/chat/completions") {
+		t.Errorf("dump missing endpoint line: %q", out)
+	}
+	if !strings.Contains(out, `"reasoning_effort": "low"`) {
+		t.Errorf("dump missing reasoning_effort: %q", out)
+	}
+}
+
+func TestDumpAsyncGet_RedactsAndOmitsBody(t *testing.T) {
+	c := New("k", WithAsyncEndpoint("https://example.test/async/chat/completions"))
+	out := c.DumpAsyncGet("job-7")
+	if !strings.Contains(out, "GET https://example.test/async/chat/completions/job-7") {
+		t.Errorf("dump missing GET line: %q", out)
+	}
+	if !strings.Contains(out, "Bearer ***REDACTED***") {
+		t.Errorf("dump missing redaction: %q", out)
+	}
+	if strings.Contains(out, "Content-Type") {
+		t.Errorf("GET dump should omit Content-Type: %q", out)
+	}
+}
+
 func TestDefaultBackoff_IsExponential(t *testing.T) {
 	cases := []struct {
 		attempt int

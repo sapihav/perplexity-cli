@@ -6,16 +6,18 @@ Binary name: `perplexity` (not `perplexity-cli`).
 
 ## Parity
 
-`███████████████░░░░░` **75%** — `search`, `ask`, `reason` shipped (3 of 4 MCP tools). Async deep `research` (M5/M6) remains. See [PARITY.md](PARITY.md).
+`██████████████████░░` **88%** — `search`, `ask`, `reason`, `research submit`, `research get` shipped (4 of 4 MCP tools, M5 async core landed). Blocking `research run` + `jobs list` (M6) remain. See [PARITY.md](PARITY.md).
 
 ## Status
 
-Milestone 4 shipped — added `reason` (chain-of-thought via
-`sonar-reasoning-pro`, with optional `<think>` block extraction). M3 brought
-the standalone `POST /search` endpoint; `ask` keeps chat-completions
-synthesis. All M2 contract flags (`--dry-run`, `--timeout`, `--json-errors`,
-`--rate-limit`, `--user-agent`, stdin `-`) apply to every subcommand. See
-`docs/backlog/` for what's next and `CHANGELOG.md` for release notes.
+Milestone 5 shipped — added the async deep-research core (`research submit` +
+`research get`) wrapping `POST /async/chat/completions` and
+`GET /async/chat/completions/{id}`. M4 brought `reason` (chain-of-thought via
+`sonar-reasoning-pro`); M3 brought the standalone `POST /search` endpoint;
+`ask` keeps chat-completions synthesis. All M2 contract flags (`--dry-run`,
+`--timeout`, `--json-errors`, `--rate-limit`, `--user-agent`, stdin `-`) apply
+to every subcommand. See `docs/backlog/` for what's next and `CHANGELOG.md`
+for release notes.
 
 ## Install
 
@@ -100,6 +102,39 @@ The reasoning models emit a `<think>...</think>` chain-of-thought block followed
 
 `reason` output payload: `{answer, thinking?, model, citations[]}`.
 
+### `perplexity research` — async deep research (sonar-deep-research)
+
+`sonar-deep-research` jobs routinely exceed sync HTTP timeouts, so the API is
+async-only: submit returns a job id, then poll until status flips to
+`COMPLETED`. The CLI mirrors that lifecycle as two subcommands.
+
+```sh
+# 1. Submit a job — returns immediately with {job_id, status, model, created_at}.
+perplexity research submit "compare leading vector databases for RAG in 2026" \
+  --reasoning-effort high
+
+# 2. Poll the job by id. Exits 0 on COMPLETED or in-flight, 1 on FAILED.
+perplexity research get <job_id>
+
+# Pipe a longer prompt from stdin or a file:
+cat prompt.txt | perplexity research submit -
+perplexity research submit - <<< "deep dive on RISC-V toolchain maturity"
+```
+
+Submit flags: `--reasoning-effort low|medium|high` (default `medium`),
+`--system <prompt>`, `--messages @file.json`, `--max-tokens N`, `--model`
+(default `sonar-deep-research`).
+
+Get flags: `--strip-thinking` (default `true`) — splits the upstream
+`<think>...</think>` block out of `result.answer` and surfaces it under
+`result.reasoning`. Pass `--strip-thinking=false` to keep the raw content
+inline.
+
+`research submit` payload: `{job_id, status, model, created_at}`.
+`research get` payload: `{job_id, status, model, created_at, started_at?,
+completed_at?, failed_at?, answer?, reasoning?, error_message?, citations[]}`.
+Status values are `CREATED`, `IN_PROGRESS`, `COMPLETED`, `FAILED`.
+
 ### `perplexity schema` — self-describing command tree
 
 ```sh
@@ -164,6 +199,12 @@ perplexity search "what is the capital of France?" --pretty
 | `--system <prompt>` | `reason` | unset | System prompt |
 | `--messages @file.json` | `reason` | unset | Prior conversation (array of `{role,content}`) |
 | `--strip-thinking` | `reason` | `true` | Strip `<think>...</think>` from `result.answer` and surface it under `result.thinking` |
+| `--model` | `research submit` | `sonar-deep-research` | Async-eligible model |
+| `--reasoning-effort` | `research submit` | `medium` | Depth/cost knob: `low` \| `medium` \| `high` |
+| `--max-tokens N` | `research submit` | unset | Cap response tokens |
+| `--system <prompt>` | `research submit` | unset | System prompt |
+| `--messages @file.json` | `research submit` | unset | Prior conversation (array of `{role,content}`) |
+| `--strip-thinking` | `research get` | `true` | Strip `<think>...</think>` from `result.answer` and surface under `result.reasoning` |
 
 ### Global (persistent on every subcommand)
 
@@ -184,7 +225,7 @@ Any subcommand that takes a query also accepts `-` to read from stdin.
 
 ## Output contract
 
-- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. Per-command payload under `result`: `search` → `{results[]{title,url,snippet,published_date,domain}}`; `ask` → `{answer, model, citations[]}`; `reason` → `{answer, thinking?, model, citations[]}`.
+- **stdout** (success): one JSON envelope per invocation — `{schema_version, provider, command, elapsed_ms, result}`. Per-command payload under `result`: `search` → `{results[]{title,url,snippet,published_date,domain}}`; `ask` → `{answer, model, citations[]}`; `reason` → `{answer, thinking?, model, citations[]}`; `research submit` → `{job_id, status, model, created_at}`; `research get` → `{job_id, status, model, created_at, started_at?, completed_at?, failed_at?, answer?, reasoning?, error_message?, citations[]}`.
 - **stderr**: human-readable progress / errors only. No envelope on the error path.
 - **Exit codes**: `0` success, `1` API error (HTTP ≥ 400 after retries), `2` user/config error (e.g., missing env var), `3` network error.
 

@@ -68,6 +68,7 @@ func init() {
 	rootCmd.AddCommand(newSearchCmd())
 	rootCmd.AddCommand(newAskCmd())
 	rootCmd.AddCommand(newReasonCmd())
+	rootCmd.AddCommand(newResearchCmd())
 	rootCmd.AddCommand(newSchemaCmd())
 	rootCmd.AddCommand(newVersionCmd())
 }

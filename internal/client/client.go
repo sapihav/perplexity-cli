@@ -21,6 +21,10 @@ const DefaultChatEndpoint = "https://api.perplexity.ai/chat/completions"
 // DefaultSearchEndpoint is the Perplexity standalone /search URL.
 const DefaultSearchEndpoint = "https://api.perplexity.ai/search"
 
+// DefaultAsyncEndpoint is the Perplexity async chat-completions URL. Submit
+// jobs via POST <endpoint>; poll job state via GET <endpoint>/{id}.
+const DefaultAsyncEndpoint = "https://api.perplexity.ai/async/chat/completions"
+
 // DefaultEndpoint is the chat-completions URL. Kept as a named alias so
 // existing callers (and tests) that constructed clients before the /search
 // migration continue to compile. New code should refer to DefaultChatEndpoint.
@@ -34,6 +38,7 @@ type Client struct {
 	httpClient     *http.Client
 	chatEndpoint   string
 	searchEndpoint string
+	asyncEndpoint  string
 	apiKey         string
 	userAgent      string
 	maxRetries     int
@@ -61,6 +66,11 @@ func WithEndpoint(url string) Option {
 // WithSearchEndpoint overrides the /search API URL (for tests).
 func WithSearchEndpoint(url string) Option {
 	return func(c *Client) { c.searchEndpoint = url }
+}
+
+// WithAsyncEndpoint overrides the /async/chat/completions API URL (for tests).
+func WithAsyncEndpoint(url string) Option {
+	return func(c *Client) { c.asyncEndpoint = url }
 }
 
 // WithMaxRetries sets how many times a 429/5xx response is retried. 0 disables retries.
@@ -106,6 +116,7 @@ func New(apiKey string, opts ...Option) *Client {
 		httpClient:     &http.Client{Timeout: 60 * time.Second},
 		chatEndpoint:   DefaultChatEndpoint,
 		searchEndpoint: DefaultSearchEndpoint,
+		asyncEndpoint:  DefaultAsyncEndpoint,
 		apiKey:         apiKey,
 		userAgent:      DefaultUserAgent,
 		maxRetries:     3,
@@ -165,9 +176,59 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	return &out, nil
 }
 
+// AsyncSubmit POSTs to /async/chat/completions to enqueue a deep-research job.
+// Returns the AsyncJob with id+status+model+created_at; the answer is fetched
+// later via AsyncGet. Same retry semantics as Complete.
+func (c *Client) AsyncSubmit(ctx context.Context, req AsyncRequest) (*AsyncJob, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal async request: %w", err)
+	}
+	raw, err := c.postJSON(ctx, c.asyncEndpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	var out AsyncJob
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode async submit response: %w", err)
+	}
+	return &out, nil
+}
+
+// AsyncGet GETs /async/chat/completions/{id} and returns the AsyncJob with
+// its current status. Caller decides whether to poll again. Same retry
+// semantics as Complete (429/5xx with backoff).
+func (c *Client) AsyncGet(ctx context.Context, id string) (*AsyncJob, error) {
+	if id == "" {
+		return nil, errors.New("async get: id is required")
+	}
+	raw, err := c.getJSON(ctx, c.asyncEndpoint+"/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var out AsyncJob
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode async get response: %w", err)
+	}
+	return &out, nil
+}
+
 // postJSON runs the shared retry loop against the given endpoint, returning
 // the raw body on success or *APIError / network error on final failure.
 func (c *Client) postJSON(ctx context.Context, endpoint string, body []byte) ([]byte, error) {
+	return c.requestJSON(ctx, http.MethodPost, endpoint, body)
+}
+
+// getJSON is the GET counterpart to postJSON, sharing the same retry loop and
+// error-mapping semantics. Body is omitted on the wire.
+func (c *Client) getJSON(ctx context.Context, endpoint string) ([]byte, error) {
+	return c.requestJSON(ctx, http.MethodGet, endpoint, nil)
+}
+
+// requestJSON is the shared retry+rate-limit core for both POST and GET. It
+// returns the raw body on success or *APIError / network error on final
+// failure.
+func (c *Client) requestJSON(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -185,7 +246,7 @@ func (c *Client) postJSON(ctx context.Context, endpoint string, body []byte) ([]
 			}
 		}
 
-		resp, err := c.do(ctx, endpoint, body)
+		resp, err := c.do(ctx, method, endpoint, body)
 		if err != nil {
 			lastErr = err
 			if attempt == c.maxRetries {
@@ -219,8 +280,8 @@ type rawResponse struct {
 }
 
 // do performs a single HTTP request to endpoint and reads the full body.
-func (c *Client) do(ctx context.Context, endpoint string, body []byte) (*rawResponse, error) {
-	httpReq, err := c.buildHTTPRequest(ctx, endpoint, body)
+func (c *Client) do(ctx context.Context, method, endpoint string, body []byte) (*rawResponse, error) {
+	httpReq, err := c.buildHTTPRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -237,13 +298,19 @@ func (c *Client) do(ctx context.Context, endpoint string, body []byte) (*rawResp
 	return &rawResponse{status: resp.StatusCode, body: b}, nil
 }
 
-func (c *Client) buildHTTPRequest(ctx context.Context, endpoint string, body []byte) (*http.Request, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+func (c *Client) buildHTTPRequest(ctx context.Context, method, endpoint string, body []byte) (*http.Request, error) {
+	var reader io.Reader
+	if len(body) > 0 {
+		reader = bytes.NewReader(body)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
+	if len(body) > 0 {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", c.userAgent)
 	return httpReq, nil
@@ -257,7 +324,7 @@ func (c *Client) Dump(req Request) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
-	return c.renderDump(c.chatEndpoint, body), nil
+	return c.renderDump(http.MethodPost, c.chatEndpoint, body), nil
 }
 
 // DumpSearch mirrors Dump for the /search endpoint.
@@ -266,16 +333,35 @@ func (c *Client) DumpSearch(req SearchRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal search request: %w", err)
 	}
-	return c.renderDump(c.searchEndpoint, body), nil
+	return c.renderDump(http.MethodPost, c.searchEndpoint, body), nil
 }
 
-func (c *Client) renderDump(endpoint string, body []byte) string {
+// DumpAsyncSubmit mirrors Dump for POST /async/chat/completions (research submit).
+func (c *Client) DumpAsyncSubmit(req AsyncRequest) (string, error) {
+	body, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal async request: %w", err)
+	}
+	return c.renderDump(http.MethodPost, c.asyncEndpoint, body), nil
+}
+
+// DumpAsyncGet mirrors Dump for GET /async/chat/completions/{id} (research get).
+// No body is sent on the wire; the dump shows only the request line + headers.
+func (c *Client) DumpAsyncGet(id string) string {
+	return c.renderDump(http.MethodGet, c.asyncEndpoint+"/"+id, nil)
+}
+
+func (c *Client) renderDump(method, endpoint string, body []byte) string {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "POST %s\n", endpoint)
+	fmt.Fprintf(&buf, "%s %s\n", method, endpoint)
 	fmt.Fprintf(&buf, "Authorization: Bearer ***REDACTED***\n")
-	fmt.Fprintf(&buf, "Content-Type: application/json\n")
+	if len(body) > 0 {
+		fmt.Fprintf(&buf, "Content-Type: application/json\n")
+	}
 	fmt.Fprintf(&buf, "Accept: application/json\n")
 	fmt.Fprintf(&buf, "User-Agent: %s\n", c.userAgent)
-	fmt.Fprintf(&buf, "\n%s\n", body)
+	if len(body) > 0 {
+		fmt.Fprintf(&buf, "\n%s\n", body)
+	}
 	return buf.String()
 }

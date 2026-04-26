@@ -2,7 +2,7 @@
 
 Maps upstream **Perplexity Sonar API** endpoints and the **official Perplexity MCP server** tools (`@perplexity-ai/mcp-server`) to the `perplexity` CLI surface.
 
-- **Last audited:** 2026-04-25
+- **Last audited:** 2026-04-26
 - **Sources:**
   - API reference: <https://docs.perplexity.ai/api-reference> (+ <https://docs.perplexity.ai/llms.txt>)
   - Official MCP: <https://github.com/perplexityai/modelcontextprotocol> (npm `@perplexity-ai/mcp-server`)
@@ -17,8 +17,8 @@ Maps upstream **Perplexity Sonar API** endpoints and the **official Perplexity M
 |---|---|---|---|---|
 | `POST /v1/chat/completions` (Sonar chat) | `perplexity_ask` | `perplexity ask <query>` | shipped | M2. `--model sonar\|sonar-pro`, `--system`, `--messages @file`, `--max-tokens`. |
 | `POST /v1/chat/completions` w/ `sonar-reasoning-pro` | `perplexity_reason` | `perplexity reason <query>` | shipped (M4) | `--model` (default `sonar-reasoning-pro`), `--system`, `--messages @file`, `--max-tokens`, `--strip-thinking` (default true → splits `<think>` block into `result.thinking`). |
-| `POST /v1/async/sonar` (submit) | part of `perplexity_research` | `perplexity research submit <prompt>` | planned (M5) | Async core for `sonar-deep-research`. [`add-async-research-submit-and-get.md`](docs/backlog/tasks/add-async-research-submit-and-get.md). P1. |
-| `GET /v1/async/sonar/{id}` | part of `perplexity_research` | `perplexity research get <id>` | planned (M5) | Same milestone as submit. |
+| `POST /async/chat/completions` (submit) | part of `perplexity_research` | `perplexity research submit <prompt>` | shipped (M5) | Async core for `sonar-deep-research`. `--reasoning-effort low\|medium\|high` (default `medium`), `--system`, `--messages @file`, `--max-tokens`. |
+| `GET /async/chat/completions/{id}` | part of `perplexity_research` | `perplexity research get <id>` | shipped (M5) | Returns `result.{job_id, status, answer?, reasoning?, model, created_at, completed_at?, failed_at?, error_message?}` + `citations[]`. Exits 0 on COMPLETED / in-flight, 1 on FAILED. |
 | `GET /v1/async/sonar` (list) | — | `perplexity jobs list` | planned (M6) | [`add-research-run-and-jobs-list.md`](docs/backlog/tasks/add-research-run-and-jobs-list.md). P2, depends on M5. |
 | (composite of submit + poll) | `perplexity_research` (blocking) | `perplexity research run <prompt>` | planned (M6) | Blocking helper; matches MCP `perplexity_research` semantics. |
 | `POST /v1/search` (ranked web search) | `perplexity_search` | `perplexity search <query>` | shipped | M1. `--max-results`, `--domain`, `--exclude-domain`, `--recency`, `--country`, `--language`, `--date-from/--date-to`. |
@@ -34,19 +34,18 @@ Maps upstream **Perplexity Sonar API** endpoints and the **official Perplexity M
 
 ## Counts
 
-- **API endpoints:** 11 (4 shipped/planned, 5 skipped, 2 n/a auth)
-- **MCP tools (official):** 4 — `perplexity_search`, `perplexity_ask`, `perplexity_research`, `perplexity_reason` (2 mapped shipped, 2 planned)
-- **CLI commands shipped:** 5 — `search`, `ask`, `reason`, `schema`, `version`
-- **CLI commands planned:** 4 — `research submit`, `research get`, `research run`, `jobs list`
+- **API endpoints:** 11 (6 shipped, 2 planned, 5 skipped, 2 n/a auth)
+- **MCP tools (official):** 4 — `perplexity_search`, `perplexity_ask`, `perplexity_research`, `perplexity_reason` (3 mapped shipped via primitives, 1 planned blocking helper)
+- **CLI commands shipped:** 7 — `search`, `ask`, `reason`, `research submit`, `research get`, `schema`, `version`
+- **CLI commands planned:** 2 — `research run`, `jobs list`
 
 ## Gaps
 
-1. **Async deep research (M5, P1)** — no `research submit`/`get` yet. Highest-priority gap; without it, MCP `perplexity_research` has no CLI equivalent.
-2. **Blocking `research run` + `jobs list` (M6, P2)** — quality-of-life on top of M5.
-3. **Enrichment flags (M7, P3)** — `--return-images`, `--return-related-questions`, `--search-domain-filter`, `--search-recency-filter` on chat/async commands.
-4. **Agent API (`/v1/agent`)** — intentionally skipped. Re-evaluate if users ask. Tracked as idea: OpenAI-compat `/v2` Responses surface (see `_index.md` Ideas).
-5. **Streaming** — SSE on `ask`/`reason` listed under Ideas, not yet a milestone.
-6. **Multimodal input** — `--image` flag idea, blocked on Sonar multimodal GA.
+1. **Blocking `research run` + `jobs list` (M6, P2)** — quality-of-life on top of M5. `research run` mirrors MCP `perplexity_research` blocking semantics by polling internally.
+2. **Enrichment flags (M7, P3)** — `--return-images`, `--return-related-questions`, `--search-domain-filter`, `--search-recency-filter` on chat/async commands.
+3. **Agent API (`/v1/agent`)** — intentionally skipped. Re-evaluate if users ask. Tracked as idea: OpenAI-compat `/v2` Responses surface (see `_index.md` Ideas).
+4. **Streaming** — SSE on `ask`/`reason` listed under Ideas, not yet a milestone.
+5. **Multimodal input** — `--image` flag idea, blocked on Sonar multimodal GA.
 
 ## Out of scope (won't ship)
 

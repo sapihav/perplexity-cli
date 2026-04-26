@@ -60,6 +60,41 @@ type SearchResult struct {
 	LastUpdated string `json:"last_updated"`
 }
 
+// AsyncRequest is the body for POST /async/chat/completions. The Perplexity
+// async endpoint nests the chat-completions request under "request"; the
+// outer object only carries that field today, but is kept distinct from
+// Request so future async-only knobs (webhooks, callbacks) can be added
+// without disturbing the synchronous chat path.
+type AsyncRequest struct {
+	Request AsyncChatRequest `json:"request"`
+}
+
+// AsyncChatRequest mirrors the per-job chat-completions payload sent to
+// /async/chat/completions. ReasoningEffort is sonar-deep-research-only and
+// omitted on the wire when empty.
+type AsyncChatRequest struct {
+	Model           string    `json:"model"`
+	Messages        []Message `json:"messages"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+}
+
+// AsyncJob is the response shape for both the submit (POST) and poll (GET)
+// endpoints. On submit the server returns id+status+model+created_at; on
+// poll the response object fills in once status=COMPLETED. failed_at and
+// error_message land on FAILED.
+type AsyncJob struct {
+	ID           string    `json:"id"`
+	Model        string    `json:"model"`
+	Status       string    `json:"status"`
+	CreatedAt    int64     `json:"created_at"`
+	StartedAt    int64     `json:"started_at,omitempty"`
+	CompletedAt  int64     `json:"completed_at,omitempty"`
+	FailedAt     int64     `json:"failed_at,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	Response     *Response `json:"response,omitempty"`
+}
+
 // APIError is returned when the upstream API responds with HTTP >= 400
 // after retries are exhausted. Body is the raw response body (may be JSON).
 type APIError struct {

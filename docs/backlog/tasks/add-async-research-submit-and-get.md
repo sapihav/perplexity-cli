@@ -2,7 +2,7 @@
 title: M5 — `research submit` + `research get` (async core)
 type: task
 priority: P1
-status: todo
+status: done
 created: 2026-04-18
 ---
 
