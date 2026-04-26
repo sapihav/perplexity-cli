@@ -2,7 +2,7 @@
 
 Maps upstream **Perplexity Sonar API** endpoints and the **official Perplexity MCP server** tools (`@perplexity-ai/mcp-server`) to the `perplexity` CLI surface.
 
-- **Last audited:** 2026-04-26
+- **Last audited:** 2026-04-26 (published-artifact smoke clean: brew cask `sapihav/tap/perplexity` v0.6.0 — `version`, `--help`, `schema` all pass)
 - **Sources:**
   - API reference: <https://docs.perplexity.ai/api-reference> (+ <https://docs.perplexity.ai/llms.txt>)
   - Official MCP: <https://github.com/perplexityai/modelcontextprotocol> (npm `@perplexity-ai/mcp-server`)
